@@ -2,7 +2,7 @@
 """
 无边框 EPUB 阅读器 — 可隐藏在系统托盘中
 支持: 无边框窗口、系统托盘、全局快捷键、透明度调节、自定义拖动、
-      书签、段落缩进、阅读进度、白色背景、目录切换
+      书签、段落缩进、阅读进度、明亮/黑暗模式切换、目录切换
 """
 
 import sys
@@ -38,8 +38,8 @@ warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 SETTINGS_FILE = Path.home() / ".epub_reader_settings.json"
 
-# ── Theme (White) ─────────────────────────────────────────────
-THEME = {
+# ── Themes ────────────────────────────────────────────────────
+LIGHT_THEME = {
     "bg": "#ffffff",
     "surface": "#f5f5f5",
     "primary": "#e0e0e0",
@@ -48,6 +48,17 @@ THEME = {
     "text_dim": "#757575",
     "border": "#e0e0e0",
     "hover": "#e8e8e8",
+}
+
+DARK_THEME = {
+    "bg": "#1e1e1e",
+    "surface": "#2d2d2d",
+    "primary": "#3c3c3c",
+    "accent": "#90caf9",
+    "text": "#e0e0e0",
+    "text_dim": "#a0a0a0",
+    "border": "#404040",
+    "hover": "#383838",
 }
 
 
@@ -60,7 +71,7 @@ def load_settings():
     return {
         "geometry": None, "opacity": 0.95, "font_size": 16,
         "last_book": None, "bookmarks": {}, "indent": 0,
-        "reading_progress": {}, "toc_visible": True,
+        "reading_progress": {}, "toc_visible": True, "dark_mode": False,
     }
 
 
@@ -165,13 +176,11 @@ class EpubParser:
 class TitleBar(QFrame):
     """可拖动的自定义标题栏"""
 
-    def __init__(self, parent):
+    def __init__(self, parent, theme):
         super().__init__(parent)
         self.parent = parent
+        self.theme = theme
         self.setFixedHeight(36)
-        self.setStyleSheet(f"""
-            QFrame {{ background: {THEME['surface']}; border-bottom: 1px solid {THEME['border']}; }}
-        """)
         self.drag_pos = None
 
         layout = QHBoxLayout(self)
@@ -182,40 +191,52 @@ class TitleBar(QFrame):
         layout.addWidget(self.icon_lbl)
 
         self.title_lbl = QLabel("EPUB Reader")
-        self.title_lbl.setStyleSheet(f"color: {THEME['text_dim']}; font-size: 12px;")
         layout.addWidget(self.title_lbl)
         layout.addStretch()
 
         # Opacity slider
         self.opacity_lbl = QLabel("透明")
-        self.opacity_lbl.setStyleSheet(f"color: {THEME['text_dim']}; font-size: 10px;")
         layout.addWidget(self.opacity_lbl)
 
         self.opacity_slider = QSlider(Qt.Horizontal)
         self.opacity_slider.setRange(30, 100)
         self.opacity_slider.setValue(int(parent.settings["opacity"] * 100))
         self.opacity_slider.setFixedWidth(80)
-        self.opacity_slider.setStyleSheet(f"""
-            QSlider::groove:horizontal {{ background: {THEME['primary']}; height: 4px; border-radius: 2px; }}
-            QSlider::handle:horizontal {{ background: {THEME['accent']}; width: 12px; margin: -4px 0; border-radius: 6px; }}
-        """)
         self.opacity_slider.valueChanged.connect(parent.set_opacity)
         layout.addWidget(self.opacity_slider)
 
+        self._win_btns = []
         for text, slot, tip in [
             ("—", parent.hide_to_tray, "隐藏到托盘"),
             ("□", parent.toggle_maximize, "最大化/还原"),
-            ("✕", parent.quit_app, "退出"),
+            ("✕", parent.hide_to_tray, "隐藏到托盘"),
         ]:
             btn = QPushButton(text)
             btn.setFixedSize(28, 24)
-            btn.setStyleSheet(f"""
-                QPushButton {{ background: transparent; color: {THEME['text_dim']}; border: none; font-size: 12px; }}
-                QPushButton:hover {{ background: {THEME['hover']}; color: {THEME['text']}; }}
-            """)
             btn.setToolTip(tip)
             btn.clicked.connect(slot)
+            self._win_btns.append(btn)
             layout.addWidget(btn)
+
+        self.apply_theme(theme)
+
+    def apply_theme(self, theme):
+        self.theme = theme
+        t = theme
+        self.setStyleSheet(f"""
+            QFrame {{ background: {t['surface']}; border-bottom: 1px solid {t['border']}; }}
+        """)
+        self.title_lbl.setStyleSheet(f"color: {t['text_dim']}; font-size: 12px;")
+        self.opacity_lbl.setStyleSheet(f"color: {t['text_dim']}; font-size: 10px;")
+        self.opacity_slider.setStyleSheet(f"""
+            QSlider::groove:horizontal {{ background: {t['primary']}; height: 4px; border-radius: 2px; }}
+            QSlider::handle:horizontal {{ background: {t['accent']}; width: 12px; margin: -4px 0; border-radius: 6px; }}
+        """)
+        for btn in self._win_btns:
+            btn.setStyleSheet(f"""
+                QPushButton {{ background: transparent; color: {t['text_dim']}; border: none; font-size: 12px; }}
+                QPushButton:hover {{ background: {t['hover']}; color: {t['text']}; }}
+            """)
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
@@ -236,29 +257,36 @@ class TitleBar(QFrame):
 class TocPanel(QFrame):
     chapter_clicked = pyqtSignal(int)
 
-    def __init__(self, parent):
+    def __init__(self, parent, theme):
         super().__init__(parent)
+        self.theme = theme
         self.setFixedWidth(220)
-        self.setStyleSheet(f"""
-            QFrame {{ background: {THEME['surface']}; border-right: 1px solid {THEME['border']}; }}
-        """)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        hdr = QLabel("  目录")
-        hdr.setFixedHeight(32)
-        hdr.setStyleSheet(f"color: {THEME['text']}; font-weight: bold; background: {THEME['primary']};")
-        layout.addWidget(hdr)
+        self._hdr = QLabel("  目录")
+        self._hdr.setFixedHeight(32)
+        layout.addWidget(self._hdr)
 
         self.list_widget = QListWidget()
-        self.list_widget.setStyleSheet(f"""
-            QListWidget {{ background: transparent; border: none; color: {THEME['text_dim']}; font-size: 13px; }}
-            QListWidget::item {{ padding: 6px 12px; border-bottom: 1px solid {THEME['border']}; }}
-            QListWidget::item:hover {{ background: {THEME['hover']}; color: {THEME['text']}; }}
-            QListWidget::item:selected {{ background: {THEME['accent']}; color: white; }}
-        """)
         self.list_widget.clicked.connect(lambda idx: self.chapter_clicked.emit(idx.row()))
         layout.addWidget(self.list_widget)
+
+        self.apply_theme(theme)
+
+    def apply_theme(self, theme):
+        self.theme = theme
+        t = theme
+        self.setStyleSheet(f"""
+            QFrame {{ background: {t['surface']}; border-right: 1px solid {t['border']}; }}
+        """)
+        self._hdr.setStyleSheet(f"color: {t['text']}; font-weight: bold; background: {t['primary']};")
+        self.list_widget.setStyleSheet(f"""
+            QListWidget {{ background: transparent; border: none; color: {t['text_dim']}; font-size: 13px; }}
+            QListWidget::item {{ padding: 6px 12px; border-bottom: 1px solid {t['border']}; }}
+            QListWidget::item:hover {{ background: {t['hover']}; color: {t['text']}; }}
+            QListWidget::item:selected {{ background: {t['accent']}; color: white; }}
+        """)
 
     def populate(self, chapters):
         self.list_widget.clear()
@@ -271,6 +299,7 @@ class EpubReader(QMainWindow):
     def __init__(self, epub_path=None):
         super().__init__()
         self.settings = load_settings()
+        self.theme = DARK_THEME if self.settings.get("dark_mode") else LIGHT_THEME
         self.parser = None
         self.chapters = []
         self.current_chapter = 0
@@ -281,6 +310,10 @@ class EpubReader(QMainWindow):
         self._setup_ui()
         self._setup_tray()
         self._setup_shortcuts()
+
+        # Apply palette on startup if dark mode
+        if self.settings.get("dark_mode"):
+            self._apply_theme()
 
         if epub_path:
             QTimer.singleShot(50, lambda: self.load_epub(epub_path))
@@ -297,21 +330,21 @@ class EpubReader(QMainWindow):
         self.resize(w, h)
 
         central = QWidget()
-        central.setStyleSheet(f"background: {THEME['bg']}; border-radius: 8px;")
+        central.setStyleSheet(f"background: {self.theme['bg']}; border-radius: 8px;")
         self.setCentralWidget(central)
 
         root_layout = QVBoxLayout(central)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
-        self.title_bar = TitleBar(self)
+        self.title_bar = TitleBar(self, self.theme)
         root_layout.addWidget(self.title_bar)
 
         self.splitter = QSplitter(Qt.Horizontal)
-        self.splitter.setStyleSheet(f"QSplitter::handle {{ background: {THEME['border']}; width: 1px; }}")
+        self.splitter.setStyleSheet(f"QSplitter::handle {{ background: {self.theme['border']}; width: 1px; }}")
 
         # ── TOC Panel ──
-        self.toc_panel = TocPanel(self)
+        self.toc_panel = TocPanel(self, self.theme)
         self.toc_panel.chapter_clicked.connect(self.goto_chapter)
         self.splitter.addWidget(self.toc_panel)
 
@@ -325,15 +358,15 @@ class EpubReader(QMainWindow):
         self.chapter_title = QLabel("")
         self.chapter_title.setFixedHeight(30)
         self.chapter_title.setStyleSheet(f"""
-            color: {THEME['text']}; font-size: 13px; font-weight: bold;
-            padding: 4px 16px; background: {THEME['surface']};
-            border-bottom: 1px solid {THEME['border']};
+            color: {self.theme['text']}; font-size: 13px; font-weight: bold;
+            padding: 4px 16px; background: {self.theme['surface']};
+            border-bottom: 1px solid {self.theme['border']};
         """)
         right_layout.addWidget(self.chapter_title)
 
         # Web view
         self.webview = QWebEngineView()
-        self.webview.setStyleSheet(f"background: {THEME['bg']};")
+        self.webview.setStyleSheet(f"background: {self.theme['bg']};")
         settings = self.webview.settings()
         settings.setAttribute(QWebEngineSettings.JavascriptEnabled, True)
         settings.setAttribute(QWebEngineSettings.LocalContentCanAccessRemoteUrls, False)
@@ -350,30 +383,30 @@ class EpubReader(QMainWindow):
         root_layout.addWidget(self.splitter)
 
         # ── Bottom bar ──
-        bottom = QFrame()
-        bottom.setFixedHeight(32)
-        bottom.setStyleSheet(f"background: {THEME['surface']}; border-top: 1px solid {THEME['border']};")
-        b_layout = QHBoxLayout(bottom)
+        self._bottom = QFrame()
+        self._bottom.setFixedHeight(32)
+        self._bottom.setStyleSheet(f"background: {self.theme['surface']}; border-top: 1px solid {self.theme['border']};")
+        b_layout = QHBoxLayout(self._bottom)
         b_layout.setContentsMargins(8, 0, 8, 0)
 
         # Open new EPUB
-        open_btn = QPushButton("📂")
-        open_btn.setFixedSize(28, 24)
-        open_btn.setToolTip("打开 EPUB 文件 (Ctrl+O)")
-        open_btn.setStyleSheet(f"""
-            QPushButton {{ color: {THEME['text_dim']}; background: transparent; border: none; font-size: 13px; }}
-            QPushButton:hover {{ color: {THEME['text']}; }}
+        self._open_btn = QPushButton("📂")
+        self._open_btn.setFixedSize(28, 24)
+        self._open_btn.setToolTip("打开 EPUB 文件 (Ctrl+O)")
+        self._open_btn.setStyleSheet(f"""
+            QPushButton {{ color: {self.theme['text_dim']}; background: transparent; border: none; font-size: 13px; }}
+            QPushButton:hover {{ color: {self.theme['text']}; }}
         """)
-        open_btn.clicked.connect(self.open_file_dialog)
-        b_layout.addWidget(open_btn)
+        self._open_btn.clicked.connect(self.open_file_dialog)
+        b_layout.addWidget(self._open_btn)
 
         # TOC toggle
         self.toc_btn = QPushButton("☰")
         self.toc_btn.setFixedSize(28, 24)
         self.toc_btn.setToolTip("显示/隐藏目录")
         self.toc_btn.setStyleSheet(f"""
-            QPushButton {{ color: {THEME['text_dim']}; background: transparent; border: none; font-size: 13px; }}
-            QPushButton:hover {{ color: {THEME['text']}; }}
+            QPushButton {{ color: {self.theme['text_dim']}; background: transparent; border: none; font-size: 13px; }}
+            QPushButton:hover {{ color: {self.theme['text']}; }}
         """)
         self.toc_btn.clicked.connect(self.toggle_toc)
         b_layout.addWidget(self.toc_btn)
@@ -383,8 +416,8 @@ class EpubReader(QMainWindow):
         self.bkmk_btn.setFixedSize(28, 24)
         self.bkmk_btn.setToolTip("添加/移除书签")
         self.bkmk_btn.setStyleSheet(f"""
-            QPushButton {{ color: {THEME['text_dim']}; background: transparent; border: none; font-size: 13px; }}
-            QPushButton:hover {{ color: {THEME['text']}; }}
+            QPushButton {{ color: {self.theme['text_dim']}; background: transparent; border: none; font-size: 13px; }}
+            QPushButton:hover {{ color: {self.theme['text']}; }}
         """)
         self.bkmk_btn.clicked.connect(self.toggle_bookmark)
         b_layout.addWidget(self.bkmk_btn)
@@ -394,18 +427,29 @@ class EpubReader(QMainWindow):
         self.bkmk_list_btn.setFixedSize(28, 24)
         self.bkmk_list_btn.setToolTip("书签列表")
         self.bkmk_list_btn.setStyleSheet(f"""
-            QPushButton {{ color: {THEME['text_dim']}; background: transparent; border: none; font-size: 13px; }}
-            QPushButton:hover {{ color: {THEME['text']}; }}
+            QPushButton {{ color: {self.theme['text_dim']}; background: transparent; border: none; font-size: 13px; }}
+            QPushButton:hover {{ color: {self.theme['text']}; }}
         """)
         self.bkmk_list_btn.clicked.connect(self.show_bookmarks_menu)
         b_layout.addWidget(self.bkmk_list_btn)
 
+        # Dark mode toggle
+        self.dark_btn = QPushButton("🌙" if not self.settings.get("dark_mode") else "☀️")
+        self.dark_btn.setFixedSize(28, 24)
+        self.dark_btn.setToolTip("切换黑暗模式 (Ctrl+T)")
+        self.dark_btn.setStyleSheet(f"""
+            QPushButton {{ color: {self.theme['text_dim']}; background: transparent; border: none; font-size: 13px; }}
+            QPushButton:hover {{ color: {self.theme['accent']}; }}
+        """)
+        self.dark_btn.clicked.connect(self.toggle_dark_mode)
+        b_layout.addWidget(self.dark_btn)
+
         b_layout.addSpacing(8)
 
         # Indent controls
-        indent_lbl = QLabel("缩进")
-        indent_lbl.setStyleSheet(f"color: {THEME['text_dim']}; font-size: 11px;")
-        b_layout.addWidget(indent_lbl)
+        self._indent_lbl = QLabel("缩进")
+        self._indent_lbl.setStyleSheet(f"color: {self.theme['text_dim']}; font-size: 11px;")
+        b_layout.addWidget(self._indent_lbl)
 
         self.indent_slider = QSlider(Qt.Horizontal)
         self.indent_slider.setRange(0, 48)
@@ -413,15 +457,15 @@ class EpubReader(QMainWindow):
         self.indent_slider.setFixedWidth(60)
         self.indent_slider.setToolTip("段落缩进 (px)")
         self.indent_slider.setStyleSheet(f"""
-            QSlider::groove:horizontal {{ background: {THEME['primary']}; height: 4px; border-radius: 2px; }}
-            QSlider::handle:horizontal {{ background: {THEME['accent']}; width: 10px; margin: -3px 0; border-radius: 5px; }}
+            QSlider::groove:horizontal {{ background: {self.theme['primary']}; height: 4px; border-radius: 2px; }}
+            QSlider::handle:horizontal {{ background: {self.theme['accent']}; width: 10px; margin: -3px 0; border-radius: 5px; }}
         """)
         self.indent_slider.valueChanged.connect(self._on_indent_changed)
         b_layout.addWidget(self.indent_slider)
 
         self.indent_val_lbl = QLabel("0")
         self.indent_val_lbl.setFixedWidth(20)
-        self.indent_val_lbl.setStyleSheet(f"color: {THEME['text_dim']}; font-size: 11px;")
+        self.indent_val_lbl.setStyleSheet(f"color: {self.theme['text_dim']}; font-size: 11px;")
         b_layout.addWidget(self.indent_val_lbl)
 
         b_layout.addStretch()
@@ -431,14 +475,14 @@ class EpubReader(QMainWindow):
         self.prev_ch_btn.setFixedSize(24, 24)
         self.prev_ch_btn.setToolTip("上一章 (←)")
         self.prev_ch_btn.setStyleSheet(f"""
-            QPushButton {{ color: {THEME['text_dim']}; background: transparent; border: none; font-size: 11px; }}
-            QPushButton:hover {{ color: {THEME['accent']}; }}
+            QPushButton {{ color: {self.theme['text_dim']}; background: transparent; border: none; font-size: 11px; }}
+            QPushButton:hover {{ color: {self.theme['accent']}; }}
         """)
         self.prev_ch_btn.clicked.connect(self.prev_chapter)
         b_layout.addWidget(self.prev_ch_btn)
 
         self.page_info = QLabel("")
-        self.page_info.setStyleSheet(f"color: {THEME['text_dim']}; font-size: 11px;")
+        self.page_info.setStyleSheet(f"color: {self.theme['text_dim']}; font-size: 11px;")
         self.page_info.setToolTip("点击查看章节列表")
         self.page_info.mousePressEvent = lambda e: self._show_chapter_menu()
         b_layout.addWidget(self.page_info)
@@ -447,8 +491,8 @@ class EpubReader(QMainWindow):
         self.next_ch_btn.setFixedSize(24, 24)
         self.next_ch_btn.setToolTip("下一章 (→)")
         self.next_ch_btn.setStyleSheet(f"""
-            QPushButton {{ color: {THEME['text_dim']}; background: transparent; border: none; font-size: 11px; }}
-            QPushButton:hover {{ color: {THEME['accent']}; }}
+            QPushButton {{ color: {self.theme['text_dim']}; background: transparent; border: none; font-size: 11px; }}
+            QPushButton:hover {{ color: {self.theme['accent']}; }}
         """)
         self.next_ch_btn.clicked.connect(self.next_chapter)
         b_layout.addWidget(self.next_ch_btn)
@@ -456,17 +500,19 @@ class EpubReader(QMainWindow):
         b_layout.addStretch()
 
         # Font size controls
+        self._font_btns = []
         for lbl, delta in [("A⁻", -1), ("A⁺", +1)]:
             btn = QPushButton(lbl)
             btn.setFixedSize(28, 24)
             btn.setStyleSheet(f"""
-                QPushButton {{ color: {THEME['text_dim']}; background: transparent; border: none; font-size: 11px; }}
-                QPushButton:hover {{ color: {THEME['text']}; }}
+                QPushButton {{ color: {self.theme['text_dim']}; background: transparent; border: none; font-size: 11px; }}
+                QPushButton:hover {{ color: {self.theme['text']}; }}
             """)
             btn.clicked.connect(lambda _, d=delta: self.change_font_size(d))
+            self._font_btns.append(btn)
             b_layout.addWidget(btn)
 
-        root_layout.addWidget(bottom)
+        root_layout.addWidget(self._bottom)
 
         # Four QSizeGrips in corners
         self._grips = []
@@ -552,7 +598,7 @@ class EpubReader(QMainWindow):
         pm.fill(Qt.transparent)
         p = QPainter(pm)
         p.setRenderHint(QPainter.Antialiasing)
-        p.setBrush(QBrush(QColor(THEME["accent"])))
+        p.setBrush(QBrush(QColor(self.theme["accent"])))
         p.setPen(Qt.NoPen)
         p.drawRoundedRect(4, 2, 24, 28, 4, 4)
         p.setBrush(QBrush(QColor("white")))
@@ -574,6 +620,7 @@ class EpubReader(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Q"), self, self.quit_app)
         QShortcut(QKeySequence("Ctrl+F"), self, self.toggle_fullscreen)
         QShortcut(QKeySequence("Ctrl+B"), self, self.toggle_bookmark)
+        QShortcut(QKeySequence("Ctrl+T"), self, self.toggle_dark_mode)
         QShortcut(QKeySequence("Ctrl+D"), self, self.toggle_toc)
         QShortcut(QKeySequence("Right"), self, self.next_chapter)
         QShortcut(QKeySequence("Left"), self, self.prev_chapter)
@@ -682,9 +729,9 @@ class EpubReader(QMainWindow):
             return
         menu = QMenu(self)
         menu.setStyleSheet(f"""
-            QMenu {{ background: {THEME['bg']}; border: 1px solid {THEME['border']}; padding: 4px; }}
-            QMenu::item {{ padding: 4px 20px; color: {THEME['text']}; }}
-            QMenu::item:selected {{ background: {THEME['accent']}; color: white; }}
+            QMenu {{ background: {self.theme['bg']}; border: 1px solid {self.theme['border']}; padding: 4px; }}
+            QMenu::item {{ padding: 4px 20px; color: {self.theme['text']}; }}
+            QMenu::item:selected {{ background: {self.theme['accent']}; color: white; }}
         """)
         for i, ch in enumerate(self.chapters):
             title = ch['title'][:50] + ('...' if len(ch['title']) > 50 else '')
@@ -703,27 +750,27 @@ class EpubReader(QMainWindow):
       font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
       font-size: {fs}px;
       line-height: 1.8;
-      color: {THEME['text']};
-      background: {THEME['bg']};
+      color: {self.theme['text']};
+      background: {self.theme['bg']};
       max-width: 720px;
       margin: 24px auto;
       padding: 0 20px;
   }}
   p {{ margin: 0.8em 0; text-indent: {indent}px; }}
-  h1, h2, h3 {{ color: {THEME['accent']}; margin-top: 1.5em; }}
+  h1, h2, h3 {{ color: {self.theme['accent']}; margin-top: 1.5em; }}
   img {{ max-width: 100%%; height: auto; border-radius: 4px; }}
-  a {{ color: {THEME['accent']}; }}
+  a {{ color: {self.theme['accent']}; }}
   blockquote {{
-      border-left: 3px solid {THEME['accent']};
+      border-left: 3px solid {self.theme['accent']};
       padding-left: 16px;
-      color: {THEME['text_dim']};
+      color: {self.theme['text_dim']};
       margin: 1em 0;
   }}
-  code {{ background: {THEME['surface']}; padding: 2px 6px; border-radius: 3px; }}
-  pre {{ background: {THEME['surface']}; padding: 12px; border-radius: 6px; overflow-x: auto; }}
+  code {{ background: {self.theme['surface']}; padding: 2px 6px; border-radius: 3px; }}
+  pre {{ background: {self.theme['surface']}; padding: 12px; border-radius: 6px; overflow-x: auto; }}
   ::-webkit-scrollbar {{ width: 6px; }}
-  ::-webkit-scrollbar-track {{ background: {THEME['bg']}; }}
-  ::-webkit-scrollbar-thumb {{ background: {THEME['border']}; border-radius: 3px; }}
+  ::-webkit-scrollbar-track {{ background: {self.theme['bg']}; }}
+  ::-webkit-scrollbar-thumb {{ background: {self.theme['border']}; border-radius: 3px; }}
 </style></head>
 <body>{body_html}</body></html>"""
 
@@ -837,6 +884,98 @@ class EpubReader(QMainWindow):
         self.setWindowOpacity(opacity)
         self.settings["opacity"] = opacity
 
+    def toggle_dark_mode(self):
+        self.theme = DARK_THEME if self.theme is LIGHT_THEME else LIGHT_THEME
+        self.settings["dark_mode"] = self.theme is DARK_THEME
+        save_settings(self.settings)
+        self._apply_theme()
+
+    def _apply_theme(self):
+        t = self.theme
+        dark = t is DARK_THEME
+
+        # Global palette
+        palette = QPalette()
+        palette.setColor(QPalette.Window, QColor(t["bg"]))
+        palette.setColor(QPalette.WindowText, QColor(t["text"]))
+        palette.setColor(QPalette.Base, QColor(t["surface"]))
+        palette.setColor(QPalette.AlternateBase, QColor(t["bg"]))
+        palette.setColor(QPalette.ToolTipBase, QColor(t["surface"]))
+        palette.setColor(QPalette.ToolTipText, QColor(t["text"]))
+        palette.setColor(QPalette.Text, QColor(t["text"]))
+        palette.setColor(QPalette.Button, QColor(t["surface"]))
+        palette.setColor(QPalette.ButtonText, QColor(t["text"]))
+        palette.setColor(QPalette.BrightText, QColor(t["accent"]))
+        palette.setColor(QPalette.Highlight, QColor(t["accent"]))
+        palette.setColor(QPalette.HighlightedText, QColor("#ffffff" if dark else "#ffffff"))
+        QApplication.instance().setPalette(palette)
+
+        # Central widget
+        self.centralWidget().setStyleSheet(f"background: {t['bg']}; border-radius: 8px;")
+
+        # Child widgets
+        self.title_bar.apply_theme(t)
+        self.toc_panel.apply_theme(t)
+
+        # Splitter
+        self.splitter.setStyleSheet(f"QSplitter::handle {{ background: {t['border']}; width: 1px; }}")
+
+        # Chapter title
+        self.chapter_title.setStyleSheet(f"""
+            color: {t['text']}; font-size: 13px; font-weight: bold;
+            padding: 4px 16px; background: {t['surface']};
+            border-bottom: 1px solid {t['border']};
+        """)
+
+        # WebView
+        self.webview.setStyleSheet(f"background: {t['bg']};")
+
+        # Bottom bar
+        self._bottom.setStyleSheet(f"background: {t['surface']}; border-top: 1px solid {t['border']};")
+
+        # Bottom bar buttons (reusable pattern)
+        btn_style = f"""QPushButton {{ color: {t['text_dim']}; background: transparent; border: none; font-size: 13px; }}
+            QPushButton:hover {{ color: {t['text']}; }}"""
+        self._open_btn.setStyleSheet(btn_style)
+        self.toc_btn.setStyleSheet(btn_style)
+        self.bkmk_btn.setStyleSheet(btn_style)
+        self.bkmk_list_btn.setStyleSheet(btn_style)
+
+        # Dark mode button
+        self.dark_btn.setText("☀️" if dark else "🌙")
+        self.dark_btn.setStyleSheet(f"""
+            QPushButton {{ color: {t['text_dim']}; background: transparent; border: none; font-size: 13px; }}
+            QPushButton:hover {{ color: {t['accent']}; }}
+        """)
+
+        # Indent controls
+        self._indent_lbl.setStyleSheet(f"color: {t['text_dim']}; font-size: 11px;")
+        indent_ss = f"""
+            QSlider::groove:horizontal {{ background: {t['primary']}; height: 4px; border-radius: 2px; }}
+            QSlider::handle:horizontal {{ background: {t['accent']}; width: 10px; margin: -3px 0; border-radius: 5px; }}
+        """
+        self.indent_slider.setStyleSheet(indent_ss)
+        self.indent_val_lbl.setStyleSheet(f"color: {t['text_dim']}; font-size: 11px;")
+
+        # Chapter nav buttons
+        nav_ss = f"""QPushButton {{ color: {t['text_dim']}; background: transparent; border: none; font-size: 11px; }}
+            QPushButton:hover {{ color: {t['accent']}; }}"""
+        self.prev_ch_btn.setStyleSheet(nav_ss)
+        self.next_ch_btn.setStyleSheet(nav_ss)
+
+        # Page info
+        self.page_info.setStyleSheet(f"color: {t['text_dim']}; font-size: 11px;")
+
+        # Font buttons
+        font_ss = f"""QPushButton {{ color: {t['text_dim']}; background: transparent; border: none; font-size: 11px; }}
+            QPushButton:hover {{ color: {t['text']}; }}"""
+        for btn in self._font_btns:
+            btn.setStyleSheet(font_ss)
+
+        # Re-render HTML with new theme
+        if self.chapters:
+            self.goto_chapter(self.current_chapter)
+
     def change_font_size(self, delta):
         s = self.webview.settings()
         current = s.fontSize(QWebEngineSettings.DefaultFontSize)
@@ -894,8 +1033,8 @@ def main():
 
     app.setStyle("Fusion")
     palette = QPalette()
-    palette.setColor(QPalette.Window, QColor(THEME["bg"]))
-    palette.setColor(QPalette.WindowText, QColor(THEME["text"]))
+    palette.setColor(QPalette.Window, QColor(LIGHT_THEME["bg"]))
+    palette.setColor(QPalette.WindowText, QColor(LIGHT_THEME["text"]))
     app.setPalette(palette)
 
     epub_path = sys.argv[1] if len(sys.argv) > 1 else None

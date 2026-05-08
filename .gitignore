@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# EPUB
+*.epub
+
+# IDE / 系统文件
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/
